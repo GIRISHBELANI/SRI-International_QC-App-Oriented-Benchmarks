@@ -47,6 +47,8 @@ from qiskit_aer.noise import depolarizing_error, reset_error
 from qedclib import metrics
 from qedclib import qcb_mpi as mpi
 
+import pennylane
+
 ##########################
 # JOB MANAGEMENT VARIABLES 
 
@@ -109,7 +111,7 @@ azure_provider = None
 logger = logging.getLogger(__name__)
 
 # Use Aer qasm_simulator by default
-backend = Aer.get_backend("qasm_simulator")  
+# backend = Aer.get_backend("qasm_simulator")  
 
 # Execution options, passed to transpile method
 backend_exec_options = None
@@ -155,6 +157,220 @@ basis_gates_array = [
 
 #######################
 # SUPPORTING CLASSES
+
+
+import pennylane as qml
+
+class PennyLaneResult:
+    def __init__(self, counts, exec_times, elapsed_times):
+        self._counts = counts
+        self.exec_times = exec_times
+        self.elapsed_times = elapsed_times
+
+    def get_counts(self, circuit=None):
+        return self._counts
+
+class PennyLaneJob:
+    def __init__(self, counts, exec_times, elapsed_times):
+        self._counts = counts
+        self._exec_times = exec_times
+        self._elapsed_times = elapsed_times
+
+    def result(self):
+        return PennyLaneResult(self._counts, self._exec_times, self._elapsed_times)
+
+class PennyLaneSimulator:
+
+    def __init__(self, device_name="default.qubit", shots=1024):
+    # def __init__(self, device_name="lightning.qubit", shots=1024):
+        self.device_name = device_name
+        self.shots = shots
+        self.name = device_name
+        self.num_qubits = 50
+            
+    def run(self, circuits, shots=None, **kwargs):
+   
+        if shots is None:
+            shots = self.shots
+    
+        # Convert a single circuit to a list
+        if not isinstance(circuits, list):
+            circuits = [circuits]
+        
+        all_meas_counts = [] 
+        exec_times = []
+        elapsed_times = []
+    
+        for qc in circuits:
+
+            circuit_start = time.perf_counter()
+
+            # print("=" * 60)
+            # print("Original Qiskit Circuit")
+            # print(type(qc))
+            # # print(qc)
+            # print("=" * 60)
+
+            # Find which qubits are measured in the original Qiskit circuit
+            measured_wires = []
+            
+            for inst in qc.data:
+                if inst.operation.name == "measure":
+                    measured_wires.append(qc.find_bit(inst.qubits[0]).index)
+            
+            # Remove duplicates while preserving order
+            measured_wires = list(dict.fromkeys(measured_wires))
+
+            measurement_map = []
+            for inst in qc.data:
+                if inst.operation.name == "measure":
+                    q = qc.find_bit(inst.qubits[0]).index
+                    c = qc.find_bit(inst.clbits[0]).index
+                    measurement_map.append((c, q))
+            #print("measurement_map : ", measurement_map)
+            
+            # Remove measurements because PennyLane imports only unitary operations
+            qc_nom = qc.remove_final_measurements(inplace=False)
+
+            # for i, q in enumerate(qc_nom.qubits):
+                # print(i, q)
+
+            # from qiskit.quantum_info import Statevector
+            # import numpy as np
+
+            # qc_sv = qc.copy()
+            # qc_sv.remove_final_measurements(inplace=True)
+            
+            # print("Has measurements:",
+            #       any(inst.operation.name == "measure" for inst in qc_sv.data))
+            
+            # sv_qiskit = Statevector.from_instruction(qc_sv)
+
+
+            ## Verify the circuit after removing measurements
+            # print("=" * 60)
+            # print("Qiskit Circuit without measurements")
+            # print(qc_nom)
+            # print("=" * 60)
+
+            # print("qc_nom : ")
+            # print(qc_nom)
+
+            ops = qc_nom.count_ops()
+            # print(ops)
+
+            # decomposition
+            qc_dec = qc_nom.decompose(reps=10)
+            # print(qc_dec)
+            
+            # # Convert Qiskit -> PennyLane
+            template = qml.from_qiskit(qc_dec)
+
+            # print("\nQiskit qubits:")
+            # for i, q in enumerate(qc_nom.qubits):
+            #     print(i, q)
+            
+            # print("\nPennyLane wires:")
+            # tape = qml.tape.make_qscript(template)()
+            # print(tape.wires)
+
+            # print("\nPennyLane operations:")
+            # for op in tape.operations:
+            #     print(op)
+                
+            # print(qml.draw(template)())
+
+            ## Verify the conversion to PennyLane
+            # print("=" * 60)
+            # print("Converted to PennyLane")
+            # print(type(template))
+            # print(template)
+            # print("=" * 60)
+            
+            dev = qml.device(
+                self.device_name,
+                wires=qc_nom.num_qubits,
+                shots= shots,
+            )
+            # print("qc_nom : ", qc_nom)
+                        
+            ## Verify the simulator being used
+            # print("=" * 60)
+            # print("PennyLane Device")
+            # print(dev)
+            # print("Device name:", dev.name)
+            # print("=" * 60)
+    
+            @qml.qnode(dev)
+            def circuit():
+                template()
+                # return qml.sample()
+                # print("measured_wires : ", measured_wires)
+                return qml.sample(wires=measured_wires)
+                # return qml.state()
+    
+            ## Verify the QNode executes            
+            # print("Executing PennyLane...")
+            start = time.perf_counter()
+            
+            # state = circuit()
+            # print(state)
+            # print(np.abs(state)**2)
+            
+            samples = circuit()
+            end = time.perf_counter()
+
+            wire_to_col = {wire: i for i, wire in enumerate(measured_wires)}
+
+            # print("Measured wires:", measured_wires)
+            # print("Execution completed.")
+
+            exec_times.append(end - start) 
+
+            # # Inspect the samples
+            # print("samples : ",samples)
+            # print("samples.shape : ", samples.shape)
+            
+            # counts = {}
+            # for s in samples:
+            #     key = "".join(map(str, s[::-1]))   # Qiskit bit order
+            #     counts[key] = counts.get(key, 0) + 1
+
+            counts = {}
+
+            for s in samples:
+                classical = ['0'] * qc.num_clbits
+
+                for c, q in measurement_map:
+                    classical[c] = str(int(s[wire_to_col[q]]))
+                
+                # Qiskit bitstrings are printed MSB -> LSB
+                # key = "".join(str(int(x)) for x in s[::-1])   # or s depending on bit order
+                key = "".join(classical[::-1])
+                counts[key] = counts.get(key, 0) + 1
+    
+            all_meas_counts.append(counts)
+            
+            circuit_end = time.perf_counter()
+        
+            elapsed_times.append(circuit_end - circuit_start)
+    
+        # print("samples.shape =", samples.shape)
+        # print("First sample =", samples[0])
+        # print("Length of sample =", len(samples[0]))
+        # print("Measured wires =", measured_wires)
+        
+        if len(all_meas_counts) == 1:
+            return PennyLaneJob(all_meas_counts[0], exec_times, elapsed_times)
+        else:
+            return PennyLaneJob(all_meas_counts, exec_times, elapsed_times)
+            
+backend_id = "pennylane(default.qubit)"
+backend = PennyLaneSimulator(device_name="default.qubit")
+
+# backend_id = "pennylane(lightning.qubit)"
+# backend = PennyLaneSimulator(device_name="lightning.qubit")
+
 
 # class ExecutionResult is a normalized result wrapper for quantum circuit execution.
 # It accepts either a Qiskit PrimitiveResult (from sampler), a raw counts dict,
@@ -278,7 +494,7 @@ def default_noise_model():
     
     return noise
 
-noise = default_noise_model()
+noise = default_noise_model()    # no need to make it None if (-non) flag is using in terminal
 
 
 ######################################################################
@@ -330,7 +546,11 @@ def set_execution_target(backend_id='qasm_simulator',
 
     # default to qasm_simulator if None passed in
     if backend_id == None:
-        backend_id="qasm_simulator"
+        backend_id = "pennylane(default.qubit)"
+        backend = PennyLaneSimulator("default.qubit")
+
+        # backend_id = "pennylane(lightning.qubit)"
+        # backend = PennyLaneSimulator("lightning.qubit")
 
     if exec_options is None:
         exec_options = {}
@@ -385,6 +605,24 @@ def set_execution_target(backend_id='qasm_simulator',
         from qiskit_aer.primitives import SamplerV2 as AerSampler
         sampler = AerSampler()  # support mid-circuit measurement
         backend = AerSimulator()
+
+    elif backend_id == "pennylane(default.qubit)":
+        backend = PennyLaneSimulator("default.qubit")
+    
+    elif backend_id == "pennylane(lightning.qubit)":
+        backend = PennyLaneSimulator("lightning.qubit")
+
+    # # handle 'fake' backends here
+    # elif 'fake' in backend_id:
+    #     backend = getattr(
+    #         importlib.import_module(
+    #             f'qiskit_ibm_runtime.fake_provider.backends.{backend_id.split("_")[-1]}.{backend_id}'
+    #         ),
+    #         backend_id.title().replace('_', '')
+    #     )
+    #     backend = backend()
+    #     logger.info(f'Set {backend = }')   
+
 
     # handle 'fake' backends here
     elif 'fake' in backend_id:
@@ -1132,6 +1370,8 @@ def execute_circuits(circuits, num_shots=100, wait=True, gpus_per_circuit=None, 
 
     backend_name = get_backend_name(backend) if backend else "unknown"
 
+    # print("backend_name : ", backend_name)
+
     ##########
     # Executor path — custom execution callback, per-circuit
     if executor:
@@ -1170,12 +1410,18 @@ def execute_circuits(circuits, num_shots=100, wait=True, gpus_per_circuit=None, 
                 last_transpile_time = 0.0
             else:
                 ts_transpile = time.time()
-                trans_qcs = transpile(circuits, backend,
+                trans_qcs = transpile(circuits, # backend,
                     optimization_level=optimization_level,
                     layout_method=layout_method,
                     routing_method=routing_method)
                 last_transpile_time = time.time() - ts_transpile
 
+            # PennyLane execution
+            # if backend_name.lower() in ["default.qubit", "lightning.qubit"]:
+            if isinstance(backend, PennyLaneSimulator):
+                job = backend.run(trans_qcs, shots=num_shots, **opts)
+                measurement_counts = job.result().get_counts()
+                
             # set job tags if SamplerV2 on IBM Quantum Platform (max 8 tags allowed)
             if hasattr(sampler, "options") and hasattr(sampler.options, "environment"):
                 job_tags = [qc.name for qc in circuits if hasattr(qc, 'name')][:8]
@@ -1183,7 +1429,7 @@ def execute_circuits(circuits, num_shots=100, wait=True, gpus_per_circuit=None, 
 
             job = sampler.run(trans_qcs, shots=num_shots)
 
-        elif this_noise is not None and not sampler and backend_name.endswith("qasm_simulator"):
+        elif this_noise is not None and not sampler and backend_name.endswith("default.qubit"):  # ("lightning.qubit"):  # 
             # Noisy simulator path — transpile to noise model's basis gates only;
             # don't pass backend alongside basis_gates (Qiskit 2.x warning)
             ts_transpile = time.time()
@@ -1205,14 +1451,20 @@ def execute_circuits(circuits, num_shots=100, wait=True, gpus_per_circuit=None, 
         else:
             # All other backends and noiseless simulator
             ts_transpile = time.time()
-            trans_qcs = transpile(circuits, backend,
+            trans_qcs = transpile(circuits,  # backend,
                 optimization_level=optimization_level,
                 layout_method=layout_method,
                 routing_method=routing_method)
             last_transpile_time = time.time() - ts_transpile
 
+            # PennyLane execution
+            # if backend_name.lower() in ["default.qubit", "lightning.qubit"]:
+            if isinstance(backend, PennyLaneSimulator):
+                job = backend.run(trans_qcs, shots=num_shots, **opts)
+                measurement_counts = job.result().get_counts()
+                
             # Statevector simulator: remove final measurements
-            if backend_name.lower() == "statevector_simulator":
+            elif backend_name.lower() == "statevector_simulator":
                 trans_qcs = [qc.remove_final_measurements(inplace=False) for qc in trans_qcs]
 
             job = backend.run(trans_qcs, shots=num_shots, **opts)
@@ -1243,6 +1495,7 @@ def execute_circuits(circuits, num_shots=100, wait=True, gpus_per_circuit=None, 
     # via threading.Event — no polling delay.
     is_local_simulator = 'simulator' in backend_name.lower()
     raw_result = wait_for_result_threaded(job, job_id, circuits, is_local_simulator)
+    # print("raw_result : ", raw_result)
 
     # Wrap result: ExecutionResult for sampler path, native Result for backend path
     if raw_result is not None:
@@ -1513,6 +1766,15 @@ def _extract_per_circuit_times(raw_result, num_circuits):
     3. Total time_taken / num_circuits (evenly divided fallback)
     4. None (caller falls back to elapsed_time)
     """
+
+    # PennyLane support
+    if hasattr(result, "exec_times"):
+        return result.exec_times
+
+    if hasattr(result, "elapsed_times"):
+        return result.elapsed_times
+
+    
     if num_circuits == 0:
         return None
 
@@ -1685,6 +1947,30 @@ def _compute_circuit_timing(results, elapsed_time, num_in_batch):
         - per_circuit_elapsed: list of elapsed times per circuit, or None
         - batch_exec_time: total batch exec time (fallback when no per-circuit)
     """
+
+
+    # PennyLane: use per-circuit execution times measured during simulation
+    if hasattr(results, "exec_times"):
+        per_circuit_times = results.exec_times
+
+        if hasattr(results, "elapsed_times"):
+            per_circuit_elapsed = results.elapsed_times
+        else:
+            per_circuit_elapsed = list(per_circuit_times)
+
+        # print("exec_times    :", per_circuit_times)
+        # print("elapsed_times :", per_circuit_elapsed)
+
+        # per_circuit_elapsed = (
+        #     list(per_circuit_times) if elapsed_time is None
+        #     else per_circuit_times
+        # )
+    
+        return (
+            per_circuit_times,
+            per_circuit_elapsed,
+            sum(per_circuit_times),
+        )
 
     # Extract per-circuit timing (attached by execute_circuits)
     per_circuit_times = getattr(results, '_per_circuit_times', None)
